@@ -1,0 +1,5 @@
+torch==2.2.2
+transformers==4.38.2
+numpy>=1.24.0,<2.0
+matplotlib>=3.7.0
+accelerate>=0.20.0
