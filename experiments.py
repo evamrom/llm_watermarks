@@ -121,7 +121,9 @@ def run_soundness_experiment(
         if detected:
             false_positives += 1
         if verbose:
-            print(f"  [{i+1:02d}] score={score:7.2f}  threshold≈{threshold:6.1f}  detected={detected}")
+            snippet = text[:80].replace("\n", " ") + ("..." if len(text) > 80 else "")
+            print(f"  [{i+1:02d}] \"{snippet}\"")
+            print(f"        score={score:7.2f}  threshold≈{threshold:6.1f}  detected={detected}")
 
     fpr = false_positives / len(human_texts)
     if verbose:

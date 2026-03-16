@@ -3,8 +3,8 @@
 Implementation of **"Undetectable Watermarks for Language Models"**
 by Christ, Gunn & Zamir (2023) — built on GPT-2 via HuggingFace.
 
-> Course project for **SPC-FEH: Secure and Private Computing – Foundations of Ethical Hacking**
-> University of St. Gallen (HSG), Institute of Computer Science, Autumn 2026
+> Course project for **Secure and Private Computing – Foundations of Ethical Hacking**
+> University of St. Gallen (HSG), Institute of Computer Science, Spring 2026
 
 ---
 
