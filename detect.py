@@ -49,8 +49,8 @@ class WatermarkDetector:
         self,
         key: bytes = DEFAULT_KEY,
         lambda_: float = DEFAULT_LAMBDA,
-        z_score: float = 6.0,             # sigma above null mean; higher = fewer false positives
-        null_mean_per_token: float = 0.7, # empirical null mean/token (multi-token inverse-CDF)
+        z_score: float = 1.5,             # sigma above null mean; higher = fewer false positives
+        null_mean_per_token: float = 1.1, # empirical null mean/token (multi-token inverse-CDF)
         max_seed_pos: int = 50,           # only try seed positions 0..max_seed_pos (seeds lock early)
         min_tokens: int = 20,             # minimum tokens after seed to score
         model_name: str = "gpt2",
@@ -182,8 +182,8 @@ class WatermarkDetector:
         if not results:
             return 0.0, False, -1
 
-        best = max(results, key=lambda r: r["score"])
-        is_watermarked = best["detected"]
+        best = max(results, key=lambda r: r["score"] - r["threshold"])
+        is_watermarked = best["score"] > best["threshold"]
         return best["score"], is_watermarked, best["seed_pos"]
 
 

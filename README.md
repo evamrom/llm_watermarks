@@ -34,7 +34,7 @@ Output: watermarked text
 1. Generate tokens naturally from GPT-2.
    Track cumulative empirical entropy: H += -log2(p_chosen_token)
 
-2. Once H ≥ λ  →  lock seed  r = all tokens so far
+2. Once H ≥ λ  →  lock seed  r = generated tokens so far (excluding prompt)
 
 3. For every subsequent token:
    u = HMAC-SHA256(sk, r, position)   ← PRF value in [0, 1]
@@ -72,6 +72,7 @@ llm_watermarjs/
 ├── watermark.py       # WatermarkGenerator — phases 1 & 2, PRF, inverse-CDF
 ├── detect.py          # WatermarkDetector  — prefix scan, scoring, threshold
 ├── experiments.py     # Soundness & Completeness tests + score distribution plot
+├── app.py             # Streamlit web app — Generate, Detect, Experiments pages
 ├── requirements.txt   # Python dependencies
 └── docs/
     ├── 2023-763.pdf               # Original paper
@@ -99,9 +100,24 @@ GPT-2 weights (~500 MB) are downloaded automatically from HuggingFace on first r
 
 ---
 
-## Running the experiments
+## Running
 
-### Full experiment suite
+### Streamlit app
+
+```bash
+source .venv/bin/activate
+streamlit run app.py
+```
+
+The app has three pages:
+
+| Page | Description |
+|------|-------------|
+| **Generate** | Enter a prompt and generate watermarked text, colour-coded by phase |
+| **Detect** | Paste any text and check whether it carries the watermark |
+| **Experiments** | Run the full Soundness & Completeness evaluation with score distribution plots |
+
+### Command-line experiment suite
 
 ```bash
 python experiments.py
@@ -113,28 +129,6 @@ This runs two tests and produces `score_distribution.png`:
 |------|-------------|-----------------|
 | **Soundness** | Runs detector on 8 human-written texts | False positive rate ≈ 0% |
 | **Completeness** | Generates 8 watermarked texts, runs detector | Detection rate ≈ 100% |
-
-Sample output:
-```
-SOUNDNESS TEST — Human-Written Text
-  [01] score=  82.14  detected=False
-  [02] score=  79.33  detected=False
-  ...
-  False positive rate: 0.0%
-
-COMPLETENESS TEST — Watermarked Text
-  [01] Generating...  prompt='The history of cryptography begins in ancient ...'
-        score= 148.62  detected=True  entropy=4.1bits  seed_at=12
-  ...
-  True detection rate: 100.0%
-
-SUMMARY
-  Human scores:       mean=81.20, std=6.43
-  Watermarked scores: mean=147.91, std=11.05
-  Score gap:          66.71
-  False positive rate: 0.0%
-  True detection rate: 100.0%
-```
 
 ### Quick demos
 
@@ -167,8 +161,10 @@ A successful implementation shows **clearly separated** distributions, confirmin
 |-----------|---------|-------------|
 | `key` | `b"spc_feh_2026_watermark_key"` | Secret key `sk` — must match between generator and detector |
 | `lambda_` | `4.0` bits | Entropy threshold for seed locking; also controls detection threshold |
-| `max_new_tokens` | `100–200` | More tokens → stronger detection signal |
-| `min_tokens` | `10` | Minimum tokens after seed to attempt detection |
+| `max_new_tokens` | `200` | More tokens → stronger detection signal; 200 recommended for reliable detection |
+| `z_score` | `1.5` | Detection threshold strictness; lower = more sensitive but higher false-positive risk |
+| `null_mean_per_token` | `1.1` | Empirical null score per token; used to calibrate the detection threshold |
+| `min_tokens` | `20` | Minimum tokens after seed to attempt detection |
 
 **Increasing `lambda_`** makes the seed lock later (more natural tokens first), which improves undetectability but requires more generated text for reliable detection.
 

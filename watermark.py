@@ -133,7 +133,7 @@ class WatermarkGenerator:
                 tokens.append(token)
 
                 if cumulative_entropy >= self.lambda_:
-                    seed = list(tokens)
+                    seed = list(tokens[prompt_len:])
                     seed_position = len(tokens)
             else:
                 # ── Phase 2: PRF-guided sampling (inverse CDF) ───────────────
