@@ -31,9 +31,8 @@ import hashlib
 import math
 import struct
 import torch
-from typing import Optional
 
-from watermark import DEFAULT_KEY, DEFAULT_LAMBDA
+from watermark import DEFAULT_KEY, DEFAULT_LAMBDA, DEFAULT_DETECT_LAMBDA
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 
@@ -49,17 +48,17 @@ class WatermarkDetector:
         self,
         key: bytes = DEFAULT_KEY,
         lambda_: float = DEFAULT_LAMBDA,
-        z_score: float = 1.5,             # sigma above null mean; higher = fewer false positives
-        null_mean_per_token: float = 1.1, # empirical null mean/token (multi-token inverse-CDF)
+        detect_lambda: float = DEFAULT_DETECT_LAMBDA,  # threshold margin; separate from generation lambda
+        null_mean_per_token: float = 1.0,  # theoretical E[score/token] under H0 for any text
         max_seed_pos: int = 50,           # only try seed positions 0..max_seed_pos (seeds lock early)
-        min_tokens: int = 20,             # minimum tokens after seed to score
+        min_tokens: int = 60,             # minimum tokens after seed to score; filters out short human texts
         model_name: str = "gpt2",
         model: GPT2LMHeadModel | None = None,
         tokenizer: GPT2Tokenizer | None = None,
     ):
         self.key = key
         self.lambda_ = lambda_
-        self.z_score = z_score
+        self.detect_lambda = detect_lambda
         self.null_mean_per_token = null_mean_per_token
         self.max_seed_pos = max_seed_pos
         self.min_tokens = min_tokens
@@ -120,7 +119,6 @@ class WatermarkDetector:
             if remaining < self.min_tokens:
                 continue
 
-            # Serialise the seed bytes once for all positions in this candidate
             seed_bytes = b"".join(tok_bytes[: i + 1])
             score_sum = 0.0
 
@@ -128,7 +126,7 @@ class WatermarkDetector:
                 t_abs = i + 1 + t_rel
 
                 # PRF: HMAC-SHA256(key, seed_bytes || position_bytes)
-                pos_bytes = struct.pack(">I", t_rel)
+                pos_bytes = struct.pack(">I", t_abs)
                 digest = hmac.new(self.key, seed_bytes + pos_bytes, hashlib.sha256).digest()
                 u = int.from_bytes(digest[:8], "big") / (2 ** 64)
                 u_c = max(min(u, 1.0 - 1e-9), 1e-9)
@@ -144,7 +142,7 @@ class WatermarkDetector:
                 v = max(u if x_predicted == x_t else 1.0 - u, 1e-10)
                 score_sum += math.log(1.0 / v)
 
-            threshold = self.null_mean_per_token * remaining + self.z_score * math.sqrt(remaining)
+            threshold = self.null_mean_per_token * remaining + self.detect_lambda * math.sqrt(remaining)
             results.append({
                 "seed_pos": i,
                 "score": score_sum,
@@ -155,24 +153,18 @@ class WatermarkDetector:
 
         return results
 
-    def detect(self, text: str, prompt: Optional[str] = None) -> bool:
-        """
-        Return True if the text is detected as watermarked.
-
-        Optionally prepend a prompt so the model has the correct context
-        (improves probability estimates, matches generation context).
-        """
-        _, detected, _ = self.score(text, prompt)
+    def detect(self, text: str) -> bool:
+        """Return True if the text is detected as watermarked."""
+        _, detected, _ = self.score(text)
         return detected
 
-    def score(self, text: str, prompt: Optional[str] = None) -> tuple[float, bool, int]:
+    def score(self, text: str) -> tuple[float, bool, int]:
         """
         Compute best detection score across all prefix positions.
 
         Returns: (best_score, is_watermarked, best_seed_position)
         """
-        full_text = (prompt + " " + text) if prompt else text
-        tokens = self.tokenizer.encode(full_text)
+        tokens = self.tokenizer.encode(text)
 
         if len(tokens) < self.min_tokens + 2:
             return 0.0, False, -1
@@ -204,10 +196,10 @@ if __name__ == "__main__":
     # Detect watermark
     det = WatermarkDetector(key=key)
 
-    score, detected, pos = det.score(wm_text, prompt)
+    score, detected, pos = det.score(wm_text)
     print(f"[Watermarked] score={score:.2f}, detected={detected}, seed_pos={pos}")
 
     # Try detection with wrong key
     det_wrong = WatermarkDetector(key=b"wrong_key_xyz")
-    score_w, detected_w, _ = det_wrong.score(wm_text, prompt)
+    score_w, detected_w, _ = det_wrong.score(wm_text)
     print(f"[Wrong key]   score={score_w:.2f}, detected={detected_w}")

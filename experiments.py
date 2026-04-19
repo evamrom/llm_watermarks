@@ -17,10 +17,14 @@ Usage:
 """
 
 import math
+import warnings
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
+warnings.filterwarnings("ignore", category=matplotlib.MatplotlibDeprecationWarning)
 
 from watermark import WatermarkGenerator
 from detect import WatermarkDetector
@@ -31,66 +35,45 @@ PROMPTS = [
     "The history of cryptography begins in ancient civilisations",
     "In quantum mechanics, the Heisenberg uncertainty principle states",
     "Climate change is driven by the accumulation of greenhouse gases",
-    "The French Revolution fundamentally altered the political landscape",
-    "Machine learning algorithms learn patterns from large datasets",
-    "The discovery of DNA structure in 1953 transformed biology",
-    "Language models are trained on vast amounts of text data",
-    "The laws of thermodynamics govern energy transformations in systems",
 ]
 
 # ── Human-written reference texts (not model-generated) ──────────────────────
 HUMAN_TEXTS = [
-    # Wikipedia-style excerpts
+    # Wikipedia-style excerpts — long enough to be scored by the detector (>120 tokens each)
     (
         "Mathematics is an area of knowledge that includes the topics of numbers, "
         "formulas and related structures, shapes and the spaces in which they are "
         "contained, and quantities and their changes. Most mathematical activity "
         "involves the discovery of properties of abstract objects and the use of "
-        "pure reason to prove them."
+        "pure reason to prove them. Mathematics is essential in the natural sciences, "
+        "engineering, medicine, finance, computer science, and the social sciences. "
+        "Although mathematics is extensively used for modelling phenomena, the "
+        "fundamental truths of mathematics are independent of any scientific "
+        "experimentation. Some areas of mathematics, such as statistics and game "
+        "theory, are developed in close correlation with their applications."
     ),
     (
         "The ocean covers more than seventy percent of Earth's surface. It is "
         "divided into five named oceans: the Pacific, Atlantic, Indian, Arctic, "
         "and Southern Oceans. Seawater contains roughly 3.5 percent dissolved "
-        "salts on average, making it undrinkable for most organisms without treatment."
+        "salts on average, making it undrinkable for most organisms without treatment. "
+        "The ocean is the principal component of Earth's hydrosphere and therefore "
+        "integral to life on Earth. Acting as a huge heat reservoir, the ocean "
+        "influences climate and weather patterns, the carbon cycle, and the water "
+        "cycle. Humans have explored less than twenty percent of the ocean floor, "
+        "and much of the deep sea remains unknown to science."
     ),
     (
         "Philosophy is the systematic study of general and fundamental questions "
         "about existence, knowledge, values, reason, mind, and language. It is "
         "distinguished from other ways of addressing such questions by its critical, "
-        "generally systematic approach and its reliance on rational argument."
-    ),
-    (
-        "A computer is a digital electronic machine that can be programmed to carry "
-        "out sequences of arithmetic or logical operations automatically. Modern "
-        "computers can perform generic sets of operations known as programs, which "
-        "enable them to perform an extremely wide range of tasks."
-    ),
-    (
-        "Music is the art of arranging sounds in time to produce a composition "
-        "through the elements of melody, harmony, rhythm, and timbre. It is one "
-        "of the universal cultural aspects of all human societies. General "
-        "definitions of music include common elements such as pitch, rhythm, "
-        "dynamics, and the sonic qualities of timbre and texture."
-    ),
-    (
-        "The immune system is a network of biological processes that protects an "
-        "organism from diseases. It detects and responds to a wide variety of "
-        "pathogens, from viruses to parasitic worms, as well as cancer cells and "
-        "objects such as wood splinters, distinguishing them from the organism's "
-        "own healthy tissue."
-    ),
-    (
-        "Architecture is the art and technique of designing and building, as "
-        "distinguished from the skills associated with construction. It is both "
-        "the process and the product of sketching, conceiving, planning, designing, "
-        "and constructing buildings or other structures."
-    ),
-    (
-        "The solar system consists of the Sun and everything gravitationally bound "
-        "to it, including the eight planets and their moons, the asteroid belt, "
-        "comets, and various smaller bodies. The four inner planets are rocky "
-        "terrestrial worlds, while the outer four are giant planets."
+        "generally systematic approach and its reliance on rational argument. "
+        "Philosophy is divided into many sub-fields that address questions about "
+        "reality, ethics, logic, and the nature of knowledge. Its methods include "
+        "conceptual analysis, thought experiments, and formal logic. Western "
+        "philosophy began in ancient Greece with figures such as Socrates, Plato, "
+        "and Aristotle, and has since developed into a rich tradition of inquiry "
+        "spanning every domain of human experience."
     ),
 ]
 
@@ -113,16 +96,15 @@ def run_soundness_experiment(
     false_positives = 0
 
     for i, text in enumerate(human_texts):
-        n_tokens = len(detector.tokenizer.encode(text))
         score, detected, pos = detector.score(text)
-        # Approximate threshold display (actual threshold in detect.py uses remaining at best pos)
-        threshold = detector.null_mean_per_token * n_tokens + detector.z_score * math.sqrt(n_tokens)
         scores.append(score)
         if detected:
             false_positives += 1
         if verbose:
             snippet = text[:80].replace("\n", " ") + ("..." if len(text) > 80 else "")
             print(f"  [{i+1:02d}] \"{snippet}\"")
+            remaining = len(detector.tokenizer.encode(text)) - pos - 1 if pos != -1 else 0
+            threshold = detector.null_mean_per_token * remaining + detector.detect_lambda * math.sqrt(remaining) if pos != -1 else 0
             print(f"        score={score:7.2f}  threshold≈{threshold:6.1f}  detected={detected}")
 
     fpr = false_positives / len(human_texts)
@@ -160,9 +142,9 @@ def run_completeness_experiment(
         seed_pos = result["seed_position"]
         entropy = result["entropy_reached"]
 
-        score, detected, best_pos = detector.score(wm_text, prompt)
-        n_tokens = len(detector.tokenizer.encode(wm_text))
-        threshold = detector.null_mean_per_token * n_tokens + detector.z_score * math.sqrt(n_tokens)
+        score, detected, best_pos = detector.score(wm_text)
+        remaining = max(len(detector.tokenizer.encode(wm_text)) - best_pos - 1, 0)
+        threshold = detector.null_mean_per_token * remaining + detector.detect_lambda * math.sqrt(remaining)
         scores.append(score)
         if detected:
             detections += 1
@@ -211,7 +193,7 @@ def plot_score_distributions(
     ax2 = axes[1]
     bp = ax2.boxplot(
         [human_scores, wm_scores],
-        labels=["Human", "Watermarked"],
+        tick_labels=["Human", "Watermarked"],
         patch_artist=True,
         notch=False,
         widths=0.5,

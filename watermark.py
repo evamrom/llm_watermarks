@@ -21,13 +21,14 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_KEY = b"spc_feh_2026_watermark_key"
-DEFAULT_LAMBDA = 4.0          # entropy threshold λ (bits) — paper uses 6λ for completeness
+DEFAULT_LAMBDA = 4.0          # entropy threshold λ (nats) for seed locking during generation
+DEFAULT_DETECT_LAMBDA = 1.5   # detection threshold margin (separate from generation lambda)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def prf(key: bytes, seed_tokens: list[int], position: int) -> float:
     """
-    Pseudorandom function F_sk(r, t) → [0, 1].
+    Pseudorandom function F_sk(r, pos) → [0, 1].
 
     Uses HMAC-SHA256(key, encode(r) || encode(t)). The first 8 bytes of the
     digest are interpreted as a 64-bit integer and normalised to [0, 1].
@@ -105,19 +106,16 @@ class WatermarkGenerator:
 
         Returns a dict with:
           - 'text':             decoded generated text (without prompt)
-          - 'all_tokens':       full token list (prompt + generated)
           - 'generated_tokens': token ids of generated text only
           - 'seed':             locked seed token list (or None if entropy never crossed λ)
-          - 'seed_position':    index in all_tokens where seed was locked
-          - 'entropy_reached':  final cumulative entropy
+          - 'seed_position':    number of tokens in the seed (ℓ from the paper)
+          - 'entropy_reached':  final cumulative entropy in nats
         """
         input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
-        prompt_len = input_ids.shape[1]
-        tokens = input_ids[0].tolist()
 
         cumulative_entropy = 0.0
         seed: list[int] | None = None
-        seed_position: int | None = None
+        generated: list[int] = []
 
         # ── Initial forward pass on the full prompt (builds KV cache) ────────
         outputs = self.model(input_ids, use_cache=True)
@@ -129,18 +127,16 @@ class WatermarkGenerator:
                 # ── Phase 1: natural sampling + entropy accumulation ─────────
                 token = int(torch.multinomial(probs, 1))
                 token_prob = float(probs[token])
-                cumulative_entropy += -math.log2(token_prob + 1e-15)
-                tokens.append(token)
-
+                cumulative_entropy += -math.log(token_prob + 1e-15)
+                generated.append(token)
                 if cumulative_entropy >= self.lambda_:
-                    seed = list(tokens[prompt_len:])
-                    seed_position = len(tokens)
+                    seed = list(generated)
             else:
                 # ── Phase 2: PRF-guided sampling (inverse CDF) ───────────────
-                t = len(tokens) - seed_position
-                u = prf(self.key, seed, t)
+                pos = len(generated)
+                u = prf(self.key, seed, pos)
                 token = inverse_cdf_sample(probs, u)
-                tokens.append(token)
+                generated.append(token)
 
             if token == self.tokenizer.eos_token_id:
                 break
@@ -154,15 +150,13 @@ class WatermarkGenerator:
             past_key_values = outputs.past_key_values
             probs = torch.softmax(outputs.logits[0, -1, :], dim=-1)
 
-        generated_tokens = tokens[prompt_len:]
-        text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        text = self.tokenizer.decode(generated, skip_special_tokens=True)
 
         return {
             "text": text,
-            "all_tokens": tokens,
-            "generated_tokens": generated_tokens,
+            "generated_tokens": generated,
             "seed": seed,
-            "seed_position": seed_position,
+            "seed_position": len(seed) if seed else None,
             "entropy_reached": cumulative_entropy,
         }
 
