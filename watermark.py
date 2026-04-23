@@ -16,13 +16,13 @@ import hmac
 import hashlib
 import math
 import struct
+from typing import Optional
 import torch
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_KEY = b"spc_feh_2026_watermark_key"
-DEFAULT_LAMBDA = 4.0          # entropy threshold λ (nats) for seed locking during generation
-DEFAULT_DETECT_LAMBDA = 1.5   # detection threshold margin (separate from generation lambda)
+DEFAULT_LAMBDA = 4.0          # λ: entropy threshold for seed locking (generation) and detection margin
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -81,8 +81,8 @@ class WatermarkGenerator:
         key: bytes = DEFAULT_KEY,
         lambda_: float = DEFAULT_LAMBDA,
         model_name: str = "gpt2",
-        model: GPT2LMHeadModel | None = None,
-        tokenizer: GPT2Tokenizer | None = None,
+        model: Optional[GPT2LMHeadModel] = None,
+        tokenizer: Optional[GPT2Tokenizer] = None,
     ):
         self.key = key
         self.lambda_ = lambda_
@@ -114,7 +114,7 @@ class WatermarkGenerator:
         input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
 
         cumulative_entropy = 0.0
-        seed: list[int] | None = None
+        seed: Optional[list] = None
         generated: list[int] = []
 
         # ── Initial forward pass on the full prompt (builds KV cache) ────────

@@ -104,7 +104,7 @@ def run_soundness_experiment(
             snippet = text[:80].replace("\n", " ") + ("..." if len(text) > 80 else "")
             print(f"  [{i+1:02d}] \"{snippet}\"")
             remaining = len(detector.tokenizer.encode(text)) - pos - 1 if pos != -1 else 0
-            threshold = detector.null_mean_per_token * remaining + detector.detect_lambda * math.sqrt(remaining) if pos != -1 else 0
+            threshold = detector.null_mean_per_token * remaining + detector.lambda_ * math.sqrt(remaining) if pos != -1 else 0
             print(f"        score={score:7.2f}  threshold≈{threshold:6.1f}  detected={detected}")
 
     fpr = false_positives / len(human_texts)
@@ -144,7 +144,7 @@ def run_completeness_experiment(
 
         score, detected, best_pos = detector.score(wm_text)
         remaining = max(len(detector.tokenizer.encode(wm_text)) - best_pos - 1, 0)
-        threshold = detector.null_mean_per_token * remaining + detector.detect_lambda * math.sqrt(remaining)
+        threshold = detector.null_mean_per_token * remaining + detector.lambda_ * math.sqrt(remaining)
         scores.append(score)
         if detected:
             detections += 1

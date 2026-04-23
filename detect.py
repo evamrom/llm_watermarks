@@ -30,9 +30,10 @@ import hmac
 import hashlib
 import math
 import struct
+from typing import Optional
 import torch
 
-from watermark import DEFAULT_KEY, DEFAULT_LAMBDA, DEFAULT_DETECT_LAMBDA
+from watermark import DEFAULT_KEY, DEFAULT_LAMBDA
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 
@@ -48,17 +49,15 @@ class WatermarkDetector:
         self,
         key: bytes = DEFAULT_KEY,
         lambda_: float = DEFAULT_LAMBDA,
-        detect_lambda: float = DEFAULT_DETECT_LAMBDA,  # threshold margin; separate from generation lambda
         null_mean_per_token: float = 1.0,  # theoretical E[score/token] under H0 for any text
         max_seed_pos: int = 50,           # only try seed positions 0..max_seed_pos (seeds lock early)
         min_tokens: int = 60,             # minimum tokens after seed to score; filters out short human texts
         model_name: str = "gpt2",
-        model: GPT2LMHeadModel | None = None,
-        tokenizer: GPT2Tokenizer | None = None,
+        model: Optional[GPT2LMHeadModel] = None,
+        tokenizer: Optional[GPT2Tokenizer] = None,
     ):
         self.key = key
         self.lambda_ = lambda_
-        self.detect_lambda = detect_lambda
         self.null_mean_per_token = null_mean_per_token
         self.max_seed_pos = max_seed_pos
         self.min_tokens = min_tokens
@@ -142,7 +141,7 @@ class WatermarkDetector:
                 v = max(u if x_predicted == x_t else 1.0 - u, 1e-10)
                 score_sum += math.log(1.0 / v)
 
-            threshold = self.null_mean_per_token * remaining + self.detect_lambda * math.sqrt(remaining)
+            threshold = self.null_mean_per_token * remaining + self.lambda_ * math.sqrt(remaining)
             results.append({
                 "seed_pos": i,
                 "score": score_sum,
