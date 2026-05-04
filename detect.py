@@ -1,29 +1,23 @@
 """
 detect.py — Watermark Detector (Christ, Gunn, Zamir 2023)
 
-Implements the detection algorithm from Section 4.3 (Algorithm 4 / Theorem 4).
+Implements the model-free detection algorithm from Section 4.3 (Algorithm 4).
 
-Key idea:
-  Given text and secret key, try every prefix position i as a candidate seed r.
-  For each candidate, compute a score measuring how well the PRF values align
-  with the actual token choices via the inverse-CDF mapping:
+Key breakthrough of the binary alphabet reduction:
+  The detector DOES NOT NEED THE LANGUAGE MODEL. Because the generator evaluated
+  p(1) bit-by-bit and chose bit = 1 if u <= p(1), the mathematical expectation 
+  is such that if a text is watermarked, the actual bit x_j is highly correlated 
+  with the PRF output F_sk, regardless of what the original LLM's probability was!
 
-    score_i = Σ_{t=i}^{L-1}  log(1 / v_t)
-
-  where  v_t = u_t        if inverse_cdf(probs, u_t) == actual_token_t   (match)
-              1 - u_t     otherwise                                        (no match)
-
-  Watermarked text: u_t is ALWAYS correlated with tokens[t] → score is anomalously high.
-  Human text:      u_t is independent of tokens[t] → score ≈ (L − i)  (baseline).
+  score_i = Σ_{j=i+1}^{L} ln(1 / v_j)
+  where v_j = F_sk            if x_j == 1
+              1 - F_sk        if x_j == 0
 
   Detection threshold (Theorem 4):
     score_i > (L − i) + λ · √(L − i)
 
-  where λ is the entropy parameter used during watermarking.
-
-Performance note:
-  A single GPT-2 forward pass over the full token sequence returns logits for
-  ALL positions simultaneously (O(1) passes), which we exploit here.
+This makes detection incredibly fast, requiring only cryptographic hashing (HMAC)
+and basic math, zero neural network inference required.
 """
 
 import hmac
@@ -31,151 +25,147 @@ import hashlib
 import math
 import struct
 from typing import Optional
-import torch
+from transformers import GPT2Tokenizer
 
 from watermark import DEFAULT_KEY, DEFAULT_LAMBDA
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+
+def prf(key: bytes, seed_bits: list[int], position: int) -> float:
+    """
+    Pseudorandom function F_sk(r, pos) → [0, 1].
+    Exactly matches the bit-level PRF from the generator.
+    """
+    byte_list = []
+    for i in range(0, len(seed_bits), 8):
+        chunk = seed_bits[i:i+8]
+        byte_val = 0
+        for bit in chunk:
+            byte_val = (byte_val << 1) | bit
+        if len(chunk) < 8:
+            byte_val <<= (8 - len(chunk))
+        byte_list.append(byte_val)
+        
+    seed_bytes = bytes(byte_list)
+    pos_bytes = struct.pack(">I", position)
+    
+    digest = hmac.new(key, seed_bytes + pos_bytes, hashlib.sha256).digest()
+    val = int.from_bytes(digest[:8], "big")
+    return val / (2 ** 64)
 
 
 class WatermarkDetector:
     """
-    Detects watermarks planted by WatermarkGenerator.
-
-    The detector scans every prefix position as a candidate seed and returns
-    True if any prefix yields an anomalously high alignment score.
+    Detects bit-level watermarks planted by WatermarkGenerator.
+    Iterates through candidate bit-prefixes, computing the correlation score.
     """
 
     def __init__(
         self,
         key: bytes = DEFAULT_KEY,
         lambda_: float = DEFAULT_LAMBDA,
-        null_mean_per_token: float = 1.0,  # theoretical E[score/token] under H0 for any text
-        max_seed_pos: int = 50,           # only try seed positions 0..max_seed_pos (seeds lock early)
-        min_tokens: int = 60,             # minimum tokens after seed to score; filters out short human texts
+        max_seed_bits: int = 800,   # Equivalent to checking the first ~50 tokens
+        min_bits: int = 960,        # Minimum remaining bits to score (~60 tokens)
         model_name: str = "gpt2",
-        model: Optional[GPT2LMHeadModel] = None,
         tokenizer: Optional[GPT2Tokenizer] = None,
     ):
         self.key = key
         self.lambda_ = lambda_
-        self.null_mean_per_token = null_mean_per_token
-        self.max_seed_pos = max_seed_pos
-        self.min_tokens = min_tokens
-        if model is not None and tokenizer is not None:
-            self.model = model
+        self.max_seed_bits = max_seed_bits
+        self.min_bits = min_bits
+        
+        # We only need the tokenizer to convert the raw text string into token IDs.
+        # No neural network (GPT2LMHeadModel) is loaded!
+        if tokenizer is not None:
             self.tokenizer = tokenizer
         else:
-            print(f"Loading {model_name} for detection...")
+            print(f"Loading tokenizer for {model_name}...")
             self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
-            self.model = GPT2LMHeadModel.from_pretrained(model_name)
-            self.model.eval()
+            
+        self.vocab_size = len(self.tokenizer)
+        self.num_bits = math.ceil(math.log2(self.vocab_size))
 
-    @torch.no_grad()
-    def _get_all_probs(self, tokens: list[int]) -> torch.Tensor:
+    def _tokens_to_bits(self, tokens: list[int]) -> list[int]:
+        """Convert a sequence of token IDs to their padded binary representations."""
+        bits = []
+        for token in tokens:
+            # Handle out-of-bounds tokens gracefully
+            t = min(token, self.vocab_size - 1)
+            for j in range(self.num_bits):
+                shift = self.num_bits - 1 - j
+                bits.append((t >> shift) & 1)
+        return bits
+
+    def score_all_prefixes(self, bits: list[int]) -> list[dict]:
         """
-        Single forward pass → probability distributions for all positions.
-
-        Returns:  all_probs[t] = softmax distribution for predicting token at position t+1
-                  Shape: [L-1, vocab_size]  (no distribution for position 0)
+        Compute detection scores for candidate seed bit-prefixes.
+        (Implements Algorithm 4 verbatim).
         """
-        input_tensor = torch.tensor([tokens])
-        outputs = self.model(input_tensor)
-        # logits[0, t, :] predicts token at position t+1 given tokens[0..t]
-        all_probs = torch.softmax(outputs.logits[0, :-1, :], dim=-1)
-        return all_probs  # shape [L-1, vocab_size]
-
-    def score_all_prefixes(self, tokens: list[int]) -> list[dict]:
-        """
-        Compute detection scores for every candidate seed prefix position.
-
-        Returns a list of dicts (one per prefix position i) with:
-          - 'seed_pos':   i
-          - 'score':      alignment score Σ log(1/v_t)
-          - 'length':     number of tokens scored (L − i − 1)
-          - 'threshold':  detection threshold for this i
-          - 'detected':   bool, score > threshold
-        """
-        L = len(tokens)
-        all_probs = self._get_all_probs(tokens)  # [L-1, vocab_size]
-
-        # ── Optimisation: sort each position's vocab ONCE, reuse for all seeds ─
-        # Without this, inverse_cdf_sample would sort 50K tokens for every
-        # (seed_pos × token) pair — O(max_seed_pos × L × V log V).
-        # Precomputing reduces it to O(L × V log V).
-        sorted_indices_all = []   # sorted_indices_all[k]: sorted token ids at position k+1
-        cumsum_all = []           # cumsum_all[k]:         CDF at position k+1
-        for t_abs in range(1, L):
-            sp, si = torch.sort(all_probs[t_abs - 1], descending=True)
-            sorted_indices_all.append(si)
-            cumsum_all.append(torch.cumsum(sp.double(), dim=0))
-
-        # ── Precompute per-token bytes to speed up seed serialisation ──────────
-        tok_bytes = [struct.pack(">I", tok) for tok in tokens]
-
+        L = len(bits)
         results = []
-        for i in range(min(L - 1, self.max_seed_pos)):
-            remaining = L - i - 1
-            if remaining < self.min_tokens:
+        
+        # i represents the length of the candidate seed (r) in bits
+        # We start from 1 up to max_seed_bits
+        for i in range(1, min(L, self.max_seed_bits + 1)):
+            remaining = L - i
+            if remaining < self.min_bits:
                 continue
-
-            seed_bytes = b"".join(tok_bytes[: i + 1])
+                
+            seed_bits = bits[:i]
             score_sum = 0.0
-
+            
+            # Score all subsequent bits
             for t_rel in range(remaining):
-                t_abs = i + 1 + t_rel
-
-                # PRF: HMAC-SHA256(key, seed_bytes || position_bytes)
-                pos_bytes = struct.pack(">I", t_abs)
-                digest = hmac.new(self.key, seed_bytes + pos_bytes, hashlib.sha256).digest()
-                u = int.from_bytes(digest[:8], "big") / (2 ** 64)
-                u_c = max(min(u, 1.0 - 1e-9), 1e-9)
-
-                # Lookup token via precomputed CDF (no re-sort)
-                si = sorted_indices_all[t_abs - 1]
-                cs = cumsum_all[t_abs - 1]
-                idx = min(int(torch.searchsorted(cs, torch.tensor(u_c, dtype=torch.float64))),
-                          len(si) - 1)
-                x_predicted = int(si[idx])
-
-                x_t = tokens[t_abs]
-                v = max(u if x_predicted == x_t else 1.0 - u, 1e-10)
+                j = i + t_rel  # global bit position
+                
+                u = prf(self.key, seed_bits, j)
+                x_j = bits[j]
+                
+                # Equation from Algorithm 4:
+                # v_j = x_j * F_sk + (1 - x_j) * (1 - F_sk)
+                v = u if x_j == 1 else 1.0 - u
+                
+                # Clamp to avoid math domain errors (log(0))
+                v = max(min(v, 1.0 - 1e-10), 1e-10)
+                
                 score_sum += math.log(1.0 / v)
-
-            threshold = self.null_mean_per_token * remaining + self.lambda_ * math.sqrt(remaining)
+                
+            # Detection threshold from Theorem 4: (L - i) + \lambda * sqrt(L - i)
+            threshold = remaining + self.lambda_ * math.sqrt(remaining)
+            
             results.append({
-                "seed_pos": i,
+                "seed_bit_pos": i,
                 "score": score_sum,
-                "length": remaining,
+                "length_bits": remaining,
                 "threshold": threshold,
                 "detected": score_sum > threshold,
             })
-
+            
         return results
+
+    def score(self, text: str) -> tuple[float, bool, int]:
+        """
+        Returns: (best_score, is_watermarked, best_seed_bit_position)
+        """
+        tokens = self.tokenizer.encode(text)
+        bits = self._tokens_to_bits(tokens)
+
+        if len(bits) < self.min_bits + 10:
+            return 0.0, False, -1
+
+        results = self.score_all_prefixes(bits)
+
+        if not results:
+            return 0.0, False, -1
+
+        # Find the candidate seed that exceeds the threshold by the largest margin
+        best = max(results, key=lambda r: r["score"] - r["threshold"])
+        is_watermarked = best["score"] > best["threshold"]
+        
+        return best["score"], is_watermarked, best["seed_bit_pos"]
 
     def detect(self, text: str) -> bool:
         """Return True if the text is detected as watermarked."""
         _, detected, _ = self.score(text)
         return detected
-
-    def score(self, text: str) -> tuple[float, bool, int]:
-        """
-        Compute best detection score across all prefix positions.
-
-        Returns: (best_score, is_watermarked, best_seed_position)
-        """
-        tokens = self.tokenizer.encode(text)
-
-        if len(tokens) < self.min_tokens + 2:
-            return 0.0, False, -1
-
-        results = self.score_all_prefixes(tokens)
-
-        if not results:
-            return 0.0, False, -1
-
-        best = max(results, key=lambda r: r["score"] - r["threshold"])
-        is_watermarked = best["score"] > best["threshold"]
-        return best["score"], is_watermarked, best["seed_pos"]
 
 
 if __name__ == "__main__":
@@ -186,19 +176,19 @@ if __name__ == "__main__":
 
     print("=== Watermark Detection Demo ===\n")
 
-    # Generate watermarked text
+    # Generate watermarked text (Requires GPU/CPU time to run LLM)
     gen = WatermarkGenerator(key=key)
-    result = gen.generate(prompt, max_new_tokens=80)
+    result = gen.generate(prompt, max_new_tokens=60)
     wm_text = result["text"]
     print(f"Watermarked text:\n{wm_text}\n")
 
-    # Detect watermark
+    # Detect watermark (Blazing fast, NO LLM REQUIRED!)
     det = WatermarkDetector(key=key)
 
     score, detected, pos = det.score(wm_text)
-    print(f"[Watermarked] score={score:.2f}, detected={detected}, seed_pos={pos}")
+    print(f"[Watermarked Text] score={score:.2f}, detected={detected}, seed_bit_pos={pos}")
 
     # Try detection with wrong key
     det_wrong = WatermarkDetector(key=b"wrong_key_xyz")
     score_w, detected_w, _ = det_wrong.score(wm_text)
-    print(f"[Wrong key]   score={score_w:.2f}, detected={detected_w}")
+    print(f"[Wrong Key]        score={score_w:.2f}, detected={detected_w}")
