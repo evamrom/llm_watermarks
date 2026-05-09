@@ -67,12 +67,12 @@ Human text:        u_t is independent of tokens        →  score ≈ baseline (
 ## Project structure
 
 ```
-llm_watermarjs/
+llm_watermarks/
 │
-├── watermark.py       # WatermarkGenerator — phases 1 & 2, PRF, inverse-CDF
+├── watermark.py       # WatermarkGenerator — phases 1 & 2, bit-level PRF sampling
 ├── detect.py          # WatermarkDetector  — prefix scan, scoring, threshold
 ├── experiments.py     # Soundness & Completeness tests + score distribution plot
-├── app.py             # Streamlit web app — Generate, Detect, Experiments pages
+├── app.py             # Streamlit web app — Generate and Detect pages
 ├── requirements.txt   # Python dependencies
 └── docs/
     ├── 2023-763.pdf               # Original paper
@@ -109,13 +109,12 @@ source .venv/bin/activate
 streamlit run app.py
 ```
 
-The app has three pages:
+The app has two pages:
 
 | Page | Description |
 |------|-------------|
 | **Generate** | Enter a prompt and generate watermarked text, colour-coded by phase |
 | **Detect** | Paste any text and check whether it carries the watermark |
-| **Experiments** | Run the full Soundness & Completeness evaluation with score distribution plots |
 
 ### Command-line experiment suite
 
@@ -160,11 +159,10 @@ A successful implementation shows **clearly separated** distributions, confirmin
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `key` | `b"spc_feh_2026_watermark_key"` | Secret key `sk` — must match between generator and detector |
-| `lambda_` | `4.0` bits | Entropy threshold for seed locking; also controls detection threshold |
+| `lambda_` | `4.0` | Entropy threshold for seed locking; also controls detection threshold |
 | `max_new_tokens` | `200` | More tokens → stronger detection signal; 200 recommended for reliable detection |
-| `z_score` | `1.5` | Detection threshold strictness; lower = more sensitive but higher false-positive risk |
-| `null_mean_per_token` | `1.1` | Empirical null score per token; used to calibrate the detection threshold |
-| `min_tokens` | `20` | Minimum tokens after seed to attempt detection |
+| `max_seed_bits` | `800` | Maximum candidate seed prefix length scanned by the detector |
+| `min_bits` | `960` | Minimum remaining bit length required before attempting detection |
 
 **Increasing `lambda_`** makes the seed lock later (more natural tokens first), which improves undetectability but requires more generated text for reliable detection.
 
@@ -174,12 +172,12 @@ A successful implementation shows **clearly separated** distributions, confirmin
 
 | Paper | This implementation |
 |-------|-------------------|
-| Binary alphabet (§4.1 reduction, each token → ~17 bits) | Inverse-CDF directly on full ~50K vocab (practical simplification) |
+| Binary alphabet (§4.1 reduction, each token → ~17 bits) | Binary alphabet reduction with GPT-2 token IDs encoded as fixed-width bit strings |
 | Random oracle `O` | HMAC-SHA256 PRF (standard replacement, §3.3) |
 | Formal soundness: `negl(λ)` false-positive rate | Empirical soundness: threshold `(L−i) + λ√(L−i)` |
 | Arbitrary LLM | GPT-2 (exposes full probability distributions, free) |
 
-The full binary reduction (§4.1) would give stronger formal guarantees but is significantly more complex to implement. The inverse-CDF approach on the full vocabulary is the natural practical equivalent and preserves the core undetectability argument.
+The implementation follows the paper's binary reduction rather than using token-level inverse-CDF sampling.
 
 ---
 

@@ -75,6 +75,16 @@ def load_model():
 
 model, tokenizer = load_model()
 
+
+def detection_threshold(detector: WatermarkDetector, text: str, seed_bit_pos: int) -> float:
+    if seed_bit_pos < 0:
+        return 0.0
+
+    tokens = detector.tokenizer.encode(text)
+    length_bits = len(detector._tokens_to_bits(tokens))
+    remaining_bits = max(length_bits - seed_bit_pos, 0)
+    return remaining_bits + detector.lambda_ * math.sqrt(remaining_bits)
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.title("LLM Watermarking")
 st.sidebar.caption("Undetectable watermarks via a cryptographic PRF.")
@@ -111,16 +121,18 @@ if page == "1 · Generate":
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Entropy at seed lock", f"{result['entropy_reached']:.2f} nats")
-        col2.metric("Seed locked at token", result["seed_position"] if result["seed_position"] else "never")
+        seed_bit_length = result["seed_bit_length"]
+        seed_token_count = math.ceil(seed_bit_length / gen.num_bits) if seed_bit_length else None
+        col2.metric("Seed locked after token", seed_token_count if seed_token_count else "never")
         col3.metric("Tokens generated", len(result["generated_tokens"]))
 
         st.markdown("---")
 
-        if result["seed_position"] is None:
+        if seed_bit_length is None:
             st.warning("Seed never locked — entropy threshold not reached.")
             st.write(result["text"])
         else:
-            seed_pos = result["seed_position"]
+            seed_pos = seed_token_count
             phase1_text = tokenizer.decode(result["generated_tokens"][:seed_pos], skip_special_tokens=True)
             phase2_text = tokenizer.decode(result["generated_tokens"][seed_pos:], skip_special_tokens=True)
 
@@ -164,11 +176,9 @@ elif page == "2 · Detect":
             label = "correct key" if run_correct else "wrong key"
 
             with st.spinner(f"Running detector ({label})..."):
-                det = WatermarkDetector(key=used_key, lambda_=lambda_, model=model, tokenizer=tokenizer)
+                det = WatermarkDetector(key=used_key, lambda_=lambda_, tokenizer=tokenizer)
                 score, detected, seed_pos = det.score(text_input)
-                n = len(tokenizer.encode(text_input))
-                remaining = max(n - seed_pos - 1, 1) if seed_pos >= 0 else n
-                threshold = det.null_mean_per_token * remaining + det.lambda_ * math.sqrt(remaining)
+                threshold = detection_threshold(det, text_input, seed_pos)
 
             st.markdown("---")
 

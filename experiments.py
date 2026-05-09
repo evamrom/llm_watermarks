@@ -30,6 +30,17 @@ from watermark import WatermarkGenerator
 from detect import WatermarkDetector
 
 
+def detection_threshold(detector: WatermarkDetector, text: str, seed_bit_pos: int) -> float:
+    """Return the detector threshold for a chosen seed bit position."""
+    if seed_bit_pos < 0:
+        return 0.0
+
+    tokens = detector.tokenizer.encode(text)
+    length_bits = len(detector._tokens_to_bits(tokens))
+    remaining_bits = max(length_bits - seed_bit_pos, 0)
+    return remaining_bits + detector.lambda_ * math.sqrt(remaining_bits)
+
+
 # ── Prompts for watermarked generation ────────────────────────────────────────
 PROMPTS = [
     "The history of cryptography begins in ancient civilisations",
@@ -103,8 +114,7 @@ def run_soundness_experiment(
         if verbose:
             snippet = text[:80].replace("\n", " ") + ("..." if len(text) > 80 else "")
             print(f"  [{i+1:02d}] \"{snippet}\"")
-            remaining = len(detector.tokenizer.encode(text)) - pos - 1 if pos != -1 else 0
-            threshold = detector.null_mean_per_token * remaining + detector.lambda_ * math.sqrt(remaining) if pos != -1 else 0
+            threshold = detection_threshold(detector, text, pos)
             print(f"        score={score:7.2f}  threshold≈{threshold:6.1f}  detected={detected}")
 
     fpr = false_positives / len(human_texts)
@@ -139,12 +149,11 @@ def run_completeness_experiment(
 
         result = generator.generate(prompt, max_new_tokens=max_new_tokens)
         wm_text = result["text"]
-        seed_pos = result["seed_position"]
+        seed_pos = result["seed_bit_length"]
         entropy = result["entropy_reached"]
 
         score, detected, best_pos = detector.score(wm_text)
-        remaining = max(len(detector.tokenizer.encode(wm_text)) - best_pos - 1, 0)
-        threshold = detector.null_mean_per_token * remaining + detector.lambda_ * math.sqrt(remaining)
+        threshold = detection_threshold(detector, wm_text, best_pos)
         scores.append(score)
         if detected:
             detections += 1
@@ -241,7 +250,7 @@ def run_all(max_new_tokens: int = 100) -> None:
     shared_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 
     generator = WatermarkGenerator(model=shared_model, tokenizer=shared_tokenizer)
-    detector = WatermarkDetector(model=shared_model, tokenizer=shared_tokenizer)
+    detector = WatermarkDetector(tokenizer=shared_tokenizer)
 
     # ── Soundness ─────────────────────────────────────────────────────────────
     human_scores, fpr = run_soundness_experiment(detector, HUMAN_TEXTS)
