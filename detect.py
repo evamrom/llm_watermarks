@@ -167,6 +167,48 @@ class WatermarkDetector:
         _, detected, _ = self.score(text)
         return detected
 
+    def score_details(self, text: str) -> dict:
+        """Full detection result with per-seed scores and cumulative trajectory for visualization."""
+        tokens = self.tokenizer.encode(text)
+        bits = self._tokens_to_bits(tokens)
+
+        empty = {"score": 0.0, "detected": False, "seed_bit_pos": -1,
+                 "threshold": 0.0, "all_results": [], "trajectory": [], "traj_thresholds": []}
+
+        if len(bits) < self.min_bits + 10:
+            return empty
+
+        all_results = self.score_all_prefixes(bits)
+        if not all_results:
+            return empty
+
+        best = max(all_results, key=lambda r: r["score"] - r["threshold"])
+        detected = best["score"] > best["threshold"]
+
+        seed_bits = bits[:best["seed_bit_pos"]]
+        trajectory, traj_thresholds = [], []
+        running = 0.0
+        for t_rel in range(len(bits) - best["seed_bit_pos"]):
+            j = best["seed_bit_pos"] + t_rel
+            u = prf(self.key, seed_bits, j)
+            x_j = bits[j]
+            v = u if x_j == 1 else 1.0 - u
+            v = max(min(v, 1.0 - 1e-10), 1e-10)
+            running += math.log(1.0 / v)
+            trajectory.append(running)
+            n = t_rel + 1
+            traj_thresholds.append(n + self.lambda_ * math.sqrt(n))
+
+        return {
+            "score": best["score"],
+            "detected": detected,
+            "seed_bit_pos": best["seed_bit_pos"],
+            "threshold": best["threshold"],
+            "all_results": all_results,
+            "trajectory": trajectory,
+            "traj_thresholds": traj_thresholds,
+        }
+
 
 if __name__ == "__main__":
     from watermark import WatermarkGenerator

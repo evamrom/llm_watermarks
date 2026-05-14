@@ -104,6 +104,8 @@ class WatermarkGenerator:
         seed_bits: Optional[list[int]] = None
         generated_bits: list[int] = []
         generated_tokens: list[int] = []
+        entropy_history: list[float] = []   # cumulative entropy per phase-1 bit
+        prf_values: list[float] = []        # u values used in phase-2 PRF calls
 
         outputs = self.model(input_ids, use_cache=True)
         past_key_values = outputs.past_key_values
@@ -139,6 +141,7 @@ class WatermarkGenerator:
                     # Track bit-level entropy
                     bit_prob = p_1 if bit == 1 else p_0
                     cumulative_entropy += -math.log(bit_prob + 1e-15)
+                    entropy_history.append(cumulative_entropy)
 
                     if cumulative_entropy >= self.lambda_:
                         # Lock the seed bits precisely at the bit where entropy crosses λ
@@ -151,6 +154,7 @@ class WatermarkGenerator:
                         bit = 1
                     else:
                         u = prf(self.key, seed_bits, global_bit_index)
+                        prf_values.append(u)
                         bit = 1 if u <= p_1 else 0
 
                 # Register bit
@@ -196,6 +200,8 @@ class WatermarkGenerator:
             "seed_bits": seed_bits,
             "seed_bit_length": len(seed_bits) if seed_bits else None,
             "entropy_reached": cumulative_entropy,
+            "entropy_history": entropy_history,
+            "prf_values": prf_values,
         }
 
 
