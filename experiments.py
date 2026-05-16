@@ -28,6 +28,8 @@ warnings.filterwarnings("ignore", category=matplotlib.MatplotlibDeprecationWarni
 
 from watermark import WatermarkGenerator
 from detect import WatermarkDetector
+from substringwatermark import SubstringWatermarkGenerator
+from substringdetect import SubstringWatermarkDetector
 
 
 def detection_threshold(detector: WatermarkDetector, text: str, seed_bit_pos: int) -> float:
@@ -41,12 +43,28 @@ def detection_threshold(detector: WatermarkDetector, text: str, seed_bit_pos: in
     return remaining_bits + detector.lambda_ * math.sqrt(remaining_bits)
 
 
+def detection_threshold_bits(detector: WatermarkDetector, bits: list[int], seed_bit_pos: int) -> float:
+    """Return the detector threshold for a generated bit sequence."""
+    if seed_bit_pos < 0:
+        return 0.0
+
+    remaining_bits = max(len(bits) - seed_bit_pos, 0)
+    return remaining_bits + detector.lambda_ * math.sqrt(remaining_bits)
+
+
 # ── Prompts for watermarked generation ────────────────────────────────────────
 PROMPTS = [
     "The history of cryptography begins in ancient civilisations",
     "In quantum mechanics, the Heisenberg uncertainty principle states",
     "Climate change is driven by the accumulation of greenhouse gases",
 ]
+
+SUBSTRING_LAMBDA = 4.0
+SUBSTRING_MIN_SEED_BITS = 64      # 4 GPT-2 tokens; avoids one-token seeds without excluding short rolling seeds.
+SUBSTRING_MIN_SCORE_BITS = 512    # 32 GPT-2 tokens; removes short-window false positives.
+SUBSTRING_MAX_SCORE_BITS = 1536   # 96 GPT-2 tokens; enough signal without overscanning.
+SUBSTRING_SCORE_STEP_BITS = 64    # Check every 4 tokens to reduce repeated-testing noise.
+SUBSTRING_MAX_NEW_TOKENS = 360
 
 # ── Human-written reference texts (not model-generated) ──────────────────────
 HUMAN_TEXTS = [
@@ -148,12 +166,12 @@ def run_completeness_experiment(
             print(f"  [{i+1:02d}] Generating...  prompt='{prompt[:45]}...'")
 
         result = generator.generate(prompt, max_new_tokens=max_new_tokens)
-        wm_text = result["text"]
+        wm_bits = result["generated_bits"]
         seed_pos = result["seed_bit_length"]
         entropy = result["entropy_reached"]
 
-        score, detected, best_pos = detector.score(wm_text)
-        threshold = detection_threshold(detector, wm_text, best_pos)
+        score, detected, best_pos = detector.score_bits(wm_bits)
+        threshold = detection_threshold_bits(detector, wm_bits, best_pos)
         scores.append(score)
         if detected:
             detections += 1
@@ -167,6 +185,61 @@ def run_completeness_experiment(
     tdr = detections / len(prompts)
     if verbose:
         print(f"\n  True detection rate: {tdr:.1%}  ({detections}/{len(prompts)})")
+
+    return scores, tdr
+
+
+def run_substring_completeness_experiment(
+    generator: SubstringWatermarkGenerator,
+    detector: SubstringWatermarkDetector,
+    prompts: list[str],
+    max_new_tokens: int = 220,
+    verbose: bool = True,
+) -> tuple[list[float], float]:
+    """
+    Substring completeness test: generate rolling-seed watermarked text, remove
+    the prefix, and check that a middle/tail substring still detects.
+    """
+    if verbose:
+        print("\n" + "=" * 60)
+        print("SUBSTRING COMPLETENESS TEST — Truncated Watermarked Text")
+        print("=" * 60)
+
+    scores = []
+    detections = 0
+
+    for i, prompt in enumerate(prompts):
+        if verbose:
+            print(f"  [{i+1:02d}] Generating...  prompt='{prompt[:45]}...'")
+
+        result = generator.generate(prompt, max_new_tokens=max_new_tokens)
+        tokens = result["generated_tokens"]
+        bits = result["generated_bits"]
+        seed_events = result["seed_events"]
+
+        # Use a middle/tail slice.  Scoring token IDs directly avoids the
+        # decode/encode round-trip issue discussed in the Streamlit UI.
+        start_token = max(len(tokens) // 3, 0)
+        substring_tokens = tokens[start_token:]
+        score, detected, seed_pos, seed_len, score_len = detector.score_tokens(substring_tokens)
+        scores.append(score)
+        if detected:
+            detections += 1
+
+        if verbose:
+            print(
+                f"        source_tokens={len(tokens):3d}  substring_tokens={len(substring_tokens):3d}"
+                f"  seed_updates={len(seed_events):2d}"
+            )
+            print(
+                f"        score={score:7.2f}  detected={detected}"
+                f"  seed={seed_pos}+{seed_len}bits  scored={score_len}bits"
+                f"  generated_bits={len(bits)}"
+            )
+
+    tdr = detections / len(prompts)
+    if verbose:
+        print(f"\n  Substring true detection rate: {tdr:.1%}  ({detections}/{len(prompts)})")
 
     return scores, tdr
 
@@ -251,6 +324,25 @@ def run_all(max_new_tokens: int = 100) -> None:
 
     generator = WatermarkGenerator(model=shared_model, tokenizer=shared_tokenizer)
     detector = WatermarkDetector(tokenizer=shared_tokenizer)
+    substring_generator = SubstringWatermarkGenerator(
+        lambda_=SUBSTRING_LAMBDA,
+        model=shared_model,
+        tokenizer=shared_tokenizer,
+    )
+    substring_detector = SubstringWatermarkDetector(
+        lambda_=SUBSTRING_LAMBDA,
+        min_seed_bits=SUBSTRING_MIN_SEED_BITS,
+        min_score_bits=SUBSTRING_MIN_SCORE_BITS,
+        max_score_bits=SUBSTRING_MAX_SCORE_BITS,
+        score_step_bits=SUBSTRING_SCORE_STEP_BITS,
+        tokenizer=shared_tokenizer,
+    )
+    print(
+        "Substring config: "
+        f"lambda={SUBSTRING_LAMBDA}, min_seed_bits={SUBSTRING_MIN_SEED_BITS}, "
+        f"min_score_bits={SUBSTRING_MIN_SCORE_BITS}, max_score_bits={SUBSTRING_MAX_SCORE_BITS}, "
+        f"score_step_bits={SUBSTRING_SCORE_STEP_BITS}, max_new_tokens={SUBSTRING_MAX_NEW_TOKENS}"
+    )
 
     # ── Soundness ─────────────────────────────────────────────────────────────
     human_scores, fpr = run_soundness_experiment(detector, HUMAN_TEXTS)
@@ -258,6 +350,14 @@ def run_all(max_new_tokens: int = 100) -> None:
     # ── Completeness ──────────────────────────────────────────────────────────
     wm_scores, tdr = run_completeness_experiment(
         generator, detector, PROMPTS, max_new_tokens=max_new_tokens
+    )
+
+    # ── Substring completeness ────────────────────────────────────────────────
+    substring_scores, substring_tdr = run_substring_completeness_experiment(
+        substring_generator,
+        substring_detector,
+        PROMPTS,
+        max_new_tokens=max(max_new_tokens, SUBSTRING_MAX_NEW_TOKENS),
     )
 
     # ── Plot ──────────────────────────────────────────────────────────────────
@@ -272,6 +372,8 @@ def run_all(max_new_tokens: int = 100) -> None:
     print(f"  Score gap:          {np.mean(wm_scores) - np.mean(human_scores):.2f}")
     print(f"  False positive rate: {fpr:.1%}")
     print(f"  True detection rate: {tdr:.1%}")
+    print(f"  Substring scores:   mean={np.mean(substring_scores):.2f}, std={np.std(substring_scores):.2f}")
+    print(f"  Substring detection rate: {substring_tdr:.1%}")
 
     # Sanity check: higher watermarked scores = scheme is working
     gap = np.mean(wm_scores) - np.mean(human_scores)

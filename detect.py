@@ -25,9 +25,13 @@ import hashlib
 import math
 import struct
 from typing import Optional
-from transformers import GPT2Tokenizer
+try:
+    from transformers import GPT2Tokenizer
+except ModuleNotFoundError:
+    GPT2Tokenizer = None
 
-from watermark import DEFAULT_KEY, DEFAULT_LAMBDA
+DEFAULT_KEY = b"spc_feh_2026_watermark_key"
+DEFAULT_LAMBDA = 4.0
 
 def prf(key: bytes, seed_bits: list[int], position: int) -> float:
     """
@@ -65,7 +69,7 @@ class WatermarkDetector:
         max_seed_bits: int = 800,   # Equivalent to checking the first ~50 tokens
         min_bits: int = 960,        # Minimum remaining bits to score (~60 tokens)
         model_name: str = "gpt2",
-        tokenizer: Optional[GPT2Tokenizer] = None,
+        tokenizer: Optional["GPT2Tokenizer"] = None,
     ):
         self.key = key
         self.lambda_ = lambda_
@@ -77,6 +81,10 @@ class WatermarkDetector:
         if tokenizer is not None:
             self.tokenizer = tokenizer
         else:
+            if GPT2Tokenizer is None:
+                raise ModuleNotFoundError(
+                    "transformers is required when no tokenizer is provided"
+                )
             print(f"Loading tokenizer for {model_name}...")
             self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
             
@@ -141,13 +149,24 @@ class WatermarkDetector:
             
         return results
 
-    def score(self, text: str) -> tuple[float, bool, int]:
-        """
-        Returns: (best_score, is_watermarked, best_seed_bit_position)
-        """
-        tokens = self.tokenizer.encode(text)
-        bits = self._tokens_to_bits(tokens)
+    def _empty_result(self) -> dict:
+        return {
+            "score": 0.0,
+            "detected": False,
+            "seed_bit_pos": -1,
+            "threshold": 0.0,
+            "all_results": [],
+            "trajectory": [],
+            "traj_thresholds": [],
+        }
 
+    def score_bits(self, bits: list[int]) -> tuple[float, bool, int]:
+        """
+        Score a bit sequence directly.
+
+        This is the preferred path for text generated inside the app because it
+        avoids decode -> encode round-trips changing GPT-2 token IDs.
+        """
         if len(bits) < self.min_bits + 10:
             return 0.0, False, -1
 
@@ -162,25 +181,42 @@ class WatermarkDetector:
         
         return best["score"], is_watermarked, best["seed_bit_pos"]
 
+    def score_tokens(self, tokens: list[int]) -> tuple[float, bool, int]:
+        """Score generated GPT-2 token IDs directly."""
+        return self.score_bits(self._tokens_to_bits(tokens))
+
+    def score(self, text: str) -> tuple[float, bool, int]:
+        """
+        Returns: (best_score, is_watermarked, best_seed_bit_position)
+        """
+        tokens = self.tokenizer.encode(text)
+        return self.score_tokens(tokens)
+
     def detect(self, text: str) -> bool:
         """Return True if the text is detected as watermarked."""
         _, detected, _ = self.score(text)
         return detected
 
-    def score_details(self, text: str) -> dict:
-        """Full detection result with per-seed scores and cumulative trajectory for visualization."""
-        tokens = self.tokenizer.encode(text)
-        bits = self._tokens_to_bits(tokens)
-
-        empty = {"score": 0.0, "detected": False, "seed_bit_pos": -1,
-                 "threshold": 0.0, "all_results": [], "trajectory": [], "traj_thresholds": []}
+    def score_details(
+        self,
+        text: Optional[str] = None,
+        tokens: Optional[list[int]] = None,
+        bits: Optional[list[int]] = None,
+    ) -> dict:
+        """Full detection result with per-seed scores and cumulative trajectory."""
+        if bits is None:
+            if tokens is None:
+                if text is None:
+                    return self._empty_result()
+                tokens = self.tokenizer.encode(text)
+            bits = self._tokens_to_bits(tokens)
 
         if len(bits) < self.min_bits + 10:
-            return empty
+            return self._empty_result()
 
         all_results = self.score_all_prefixes(bits)
         if not all_results:
-            return empty
+            return self._empty_result()
 
         best = max(all_results, key=lambda r: r["score"] - r["threshold"])
         detected = best["score"] > best["threshold"]
@@ -224,13 +260,13 @@ if __name__ == "__main__":
     wm_text = result["text"]
     print(f"Watermarked text:\n{wm_text}\n")
 
-    # Detect watermark (Blazing fast, NO LLM REQUIRED!)
+    # Detect watermark from generated bits (no decode/encode round-trip).
     det = WatermarkDetector(key=key)
 
-    score, detected, pos = det.score(wm_text)
+    score, detected, pos = det.score_bits(result["generated_bits"])
     print(f"[Watermarked Text] score={score:.2f}, detected={detected}, seed_bit_pos={pos}")
 
     # Try detection with wrong key
     det_wrong = WatermarkDetector(key=b"wrong_key_xyz")
-    score_w, detected_w, _ = det_wrong.score(wm_text)
+    score_w, detected_w, _ = det_wrong.score_bits(result["generated_bits"])
     print(f"[Wrong Key]        score={score_w:.2f}, detected={detected_w}")
